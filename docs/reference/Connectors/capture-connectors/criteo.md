@@ -6,6 +6,11 @@ description: Build Criteo ad data flows in Estuary with advertisers, ad sets, au
 
 This connector captures data from [Criteo's API](https://developers.criteo.com/marketing-solutions/reference).
 
+:::deprecated
+This connector is deprecated and no longer receives updates. Existing capture tasks continue to run,
+but the connector is not recommended for new captures.
+:::
+
 ## Supported data resources
 
 The following data resources are supported through the Criteo APIs:

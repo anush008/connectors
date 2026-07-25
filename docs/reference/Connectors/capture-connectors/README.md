@@ -90,7 +90,7 @@ All Estuary connectors capture data in real time, as it appears in the source sy
 - Chargebee
   - [Configuration](./chargebee-native.md)
   - Package - ghcr.io/estuary/source-chargebee-native:v1
-- Criteo
+- Criteo (deprecated)
   - [Configuration](./criteo.md)
   - Package - ghcr.io/estuary/source-criteo:v1
 - Datadog
