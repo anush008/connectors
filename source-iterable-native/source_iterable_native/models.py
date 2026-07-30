@@ -2,7 +2,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Annotated, ClassVar, TypeVar
+from typing import Annotated, Any, ClassVar, TypeVar
 
 import xxhash
 from pydantic import AwareDatetime, BaseModel, Field, ValidationInfo, model_validator
@@ -146,11 +146,47 @@ class EventTypes(StrEnum):
     WHATSAPP_USAGE_INFO = "whatsAppUsageInfo"
 
 
+_META_SOURCED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    # Objects declaring properties must forbid additional properties at every
+    # level.
+    "additionalProperties": False,
+    "properties": {
+        "op": {
+            "type": "string",
+            "enum": ["c", "u", "d"],
+            "minLength": 1,
+            "maxLength": 1,
+        },
+        # row_id counts up from zero, or -1 when unknown.
+        "row_id": {"type": "integer", "minimum": -1, "maximum": -1},
+    },
+    "required": ["op", "row_id"],
+}
+
+
+def build_sourced_schema(key_properties: dict[str, Any]) -> dict[str, Any]:
+    """Build a stream's sourced schema from the key fields it needs to preserve.
+    """
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "_meta": _META_SOURCED_SCHEMA,
+            **key_properties,
+        },
+        "required": ["_meta", *key_properties],
+    }
+
+
 class IterableResource(BaseDocument, extra="allow"):
     name: ClassVar[str]
     path: ClassVar[str]
     interval: ClassVar[timedelta] = timedelta(minutes=15)
     disable: ClassVar[bool] = False
+    # Key fields to name in this stream's sourced schema. Streams keyed on
+    # /_meta/row_id need nothing beyond the _meta block.
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {}
 
 
 TIterableResource = TypeVar(name="TIterableResource", bound=IterableResource)
@@ -195,6 +231,10 @@ class ListUsers(IterableResource):
     interval: ClassVar[timedelta] = timedelta(hours=24)
     schedule: ClassVar[str] = "55 23 * * *"
     disable: ClassVar[bool] = True
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        "list_id": {"type": "integer", "minimum": 1, "maximum": 1},
+        "user_id": {"type": "string", "minLength": 1, "maxLength": 1},
+    }
 
     list_id: int
     user_id: str
@@ -228,6 +268,9 @@ class Campaigns(ResourceWithId):
     name: ClassVar[str] = "campaigns"
     path: ClassVar[str] = "campaigns"
     interval: ClassVar[timedelta] = timedelta(minutes=5)
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        "id": {"type": "integer", "minimum": 1, "maximum": 1},
+    }
 
     createdAt: int
     updatedAt: int
@@ -255,6 +298,11 @@ class CampaignMetrics(BaseCSVRow):
     path: ClassVar[str] = "campaigns/metrics"
     interval: ClassVar[timedelta] = timedelta(minutes=15)
     disable: ClassVar[bool] = False
+    # CampaignMetrics descends from BaseCSVRow rather than IterableResource,
+    # so it declares KEY_PROPERTIES itself.
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        "id": {"type": "integer", "minimum": 1, "maximum": 1},
+    }
 
     id: int
 
@@ -343,6 +391,11 @@ class EventValidationContext:
 
 class Events(ExportResource):
     name: ClassVar[str] = "events"
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        # A 128 bit hash rendered as hex is always exactly 32 characters.
+        "_estuary_id": {"type": "string", "minLength": 32, "maxLength": 32},
+        "eventType": {"type": "string", "minLength": 1, "maxLength": 1},
+    }
 
     createdAt: AwareDatetime
     eventType: str
@@ -422,6 +475,9 @@ class BaseUsers(ExportResource):
 
 class UsersWithIds(BaseUsers):
     primary_key: ClassVar[str] = "itblUserId"
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        "itblUserId": {"type": "string", "minLength": 1, "maxLength": 1},
+    }
 
     itblUserId: str
 
@@ -432,6 +488,9 @@ class UsersWithIds(BaseUsers):
 
 class UsersWithEmails(BaseUsers):
     primary_key: ClassVar[str] = "email"
+    KEY_PROPERTIES: ClassVar[dict[str, Any]] = {
+        "email": {"type": "string", "minLength": 1, "maxLength": 1},
+    }
 
     email: str
 
