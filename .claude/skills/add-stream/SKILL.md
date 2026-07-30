@@ -25,13 +25,7 @@ These apply in every phase. Re-read them before each phase boundary.
 
 Confirm the connector exists. Locate its `models.py`, `resources.py`, `api.py` (or equivalents — naming varies between Python connectors). Read streams in the same connector before designing anything.
 
-**Clean-room check.** Kick off the connector's existing test suite (typically `pytest` from the connector directory) in the background as soon as Phase 0 begins. Phases 1–3 are read-only / planning and may proceed in parallel while the suite runs — do **not** block on it. The clean-room result is a **gate on Phase 4**: before writing any code for the new stream, confirm the baseline passes so later failures are attributable to the new stream, not pre-existing drift.
-
-If the suite fails:
-
-- **Simple schema drift** (the connector spec/discover output has shifted but the code is unchanged): you may dispatch the `regenerate-flow-discovery` agent to refresh the snapshots, then commit the result on its own with the message `<connector-name>: update tests`. Keep this commit separate from the new-stream work so the PR diff stays scoped.
-- **Flakey fields in the diff** (timestamps like `updated_at`, ETags, anything that changes between runs): surface them to the user and ask whether to add them to the connector's `FIELDS_TO_REDACT` list in `tests/test_snapshots.py` (name varies between connectors — grep for `FIELDS_TO_REDACT` to find the convention).
-- **Anything else:** stop and surface the failure to the user before entering Phase 4.
+**Clean-room check (`CONDUCT-CLEAN-ROOM`).** Kick off the connector's existing test suite in the background as soon as Phase 0 begins. Phases 1–3 are read-only / planning and may proceed in parallel while the suite runs — do **not** block on it. The result is a **gate on Phase 4**: confirm the baseline passes before writing any code for the new stream. Failure handling — including the separate `<connector-name>: update tests` commit for stale snapshots — is in [session-conduct.md](../../shared/session-conduct.md).
 
 ## Phase 1 — Rate Limit Survey
 
