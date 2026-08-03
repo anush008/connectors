@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -24,7 +25,30 @@ import (
 	"github.com/gogo/protobuf/jsonpb"
 	"github.com/gogo/protobuf/proto"
 	log "github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
+
+// DestinationReader enumerates the documents a materialized resource currently
+// holds. It is optional: a connector which does not implement it simply cannot be
+// verified by a harness that reads destinations, and is otherwise unaffected.
+//
+// This exists so that an exactly-once test harness can check what actually landed,
+// rather than trusting the connector's own account of what it wrote. Verification
+// that asks the subject under test to report on itself proves very little, and the
+// protocol offers no way to read a destination back — Load answers only the keys the
+// runtime asks about, and only for bindings that are not delta-updates.
+//
+// `out` is called once per document, in whatever order the destination returns them;
+// a harness that cares about order must sort. Implementations should stream rather
+// than accumulate: a materialized table can be far larger than memory.
+type DestinationReader interface {
+	ReadDestination(
+		ctx context.Context,
+		endpointConfig json.RawMessage,
+		resourceConfig json.RawMessage,
+		out func(json.RawMessage) error,
+	) error
+}
 
 type Connector interface {
 	Spec(context.Context, *pm.Request_Spec) (*pm.Response_Spec, error)
@@ -34,7 +58,16 @@ type Connector interface {
 }
 
 // RunMain is the boilerplate main function of a materialization connector.
+//
+// With no arguments it serves the materialization protocol on stdin/stdout, which is
+// how the runtime invokes a connector. The `read` subcommand is the one exception,
+// and exists for test harnesses: see runRead.
 func RunMain(connector Connector) {
+	if len(os.Args) > 1 && os.Args[1] == "read" {
+		runRead(connector, os.Args[2:])
+		return
+	}
+
 	switch format := getEnvDefault("LOG_FORMAT", "color"); format {
 	case "json":
 		log.SetFormatter(&log.JSONFormatter{})
@@ -246,4 +279,72 @@ func (c *jsonCodec) Send(m *pm.Response) error {
 func (c *jsonCodec) RecvMsg(m *pm.Request) error {
 	m.Reset()
 	return c.unmarshaler.UnmarshalNext(c.decoder, m)
+}
+
+// runRead prints the documents of one materialized resource as newline-delimited
+// JSON, for a harness verifying what a connector actually wrote.
+//
+// Deliberately a subcommand rather than a protocol message. The materialization
+// protocol has no "read your destination back" request and should not grow one for
+// the benefit of tests: the runtime would never send it, so it would be dead weight
+// in every connector and a second code path to keep honest. A subcommand is invoked
+// only by whoever wants it.
+func runRead(connector Connector, args []string) {
+	var flags = flag.NewFlagSet("read", flag.ExitOnError)
+	var configPath = flags.String("config", "", "path to the endpoint configuration, as JSON or YAML")
+	var resourcePath = flags.String("resource", "", "path to the resource configuration, as JSON or YAML")
+	if err := flags.Parse(args); err != nil {
+		log.WithField("error", err).Fatal("parsing read arguments")
+	}
+
+	reader, ok := connector.(DestinationReader)
+	if !ok {
+		log.Fatal("this connector cannot read its destination: it does not implement DestinationReader")
+	}
+
+	var endpointConfig, resourceConfig json.RawMessage
+	for _, arg := range []struct {
+		path string
+		name string
+		into *json.RawMessage
+	}{
+		{*configPath, "config", &endpointConfig},
+		{*resourcePath, "resource", &resourceConfig},
+	} {
+		if arg.path == "" {
+			log.Fatalf("--%s is required", arg.name)
+		}
+		raw, err := os.ReadFile(arg.path)
+		if err != nil {
+			log.WithField("error", err).Fatalf("reading --%s", arg.name)
+		}
+		// Accepted as YAML, which is how these files are written in the connectors
+		// repository, and which subsumes JSON.
+		var intermediate any
+		if err := yaml.Unmarshal(raw, &intermediate); err != nil {
+			log.WithField("error", err).Fatalf("parsing --%s", arg.name)
+		}
+		parsed, err := json.Marshal(intermediate)
+		if err != nil {
+			log.WithField("error", err).Fatalf("converting --%s to JSON", arg.name)
+		}
+		*arg.into = parsed
+	}
+
+	var ctx, cancel = signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+
+	var out = bufio.NewWriter(os.Stdout)
+	if err := reader.ReadDestination(ctx, endpointConfig, resourceConfig, func(doc json.RawMessage) error {
+		if _, err := out.Write(doc); err != nil {
+			return err
+		}
+		_, err := out.WriteString("\n")
+		return err
+	}); err != nil {
+		log.WithField("error", err).Fatal("reading the destination")
+	}
+	if err := out.Flush(); err != nil {
+		log.WithField("error", err).Fatal("flushing the destination read")
+	}
 }

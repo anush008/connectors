@@ -472,3 +472,124 @@ func (t *TxDefuser) MaybeRollback() {
 func (t *TxDefuser) Defuse() {
 	t.defused = true
 }
+
+// RowReader is an optional Client capability: enumerate the rows a materialized
+// table holds, as one JSON object per row keyed by column name.
+//
+// Optional because it exists only for verification, and a client that cannot offer
+// it should not be forced to. Most implementations are one line over StdReadRows.
+type RowReader interface {
+	ReadRows(ctx context.Context, path []string, out func(json.RawMessage) error) error
+}
+
+// ReadDestination implements boilerplate.DestinationReader for every SQL connector,
+// by delegating to its Client's optional RowReader.
+//
+// Rows come back as flat column-name objects rather than as the collection documents
+// that produced them. That is the honest shape: a materialized table *is* columns, a
+// standard binding need not carry a root document at all (see the connectors'
+// `no_flow_document` option), and reconstructing the original document would mean
+// re-implementing the connector's projections in reverse. A harness comparing against
+// a collection has to reckon with the mapping either way, so this does not hide it.
+func (d *Driver[EC, RC]) ReadDestination(
+	ctx context.Context,
+	endpointConfig json.RawMessage,
+	resourceConfig json.RawMessage,
+	out func(json.RawMessage) error,
+) error {
+	var cfg EC
+	if err := boilerplate.UnmarshalStrict(endpointConfig, &cfg); err != nil {
+		return fmt.Errorf("parsing endpoint config: %w", err)
+	}
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("validating endpoint config: %w", err)
+	}
+
+	var resource RC
+	if err := boilerplate.UnmarshalStrict(resourceConfig, &resource); err != nil {
+		return fmt.Errorf("parsing resource config: %w", err)
+	}
+	resource = resource.WithDefaults(cfg)
+	if err := resource.Validate(); err != nil {
+		return fmt.Errorf("validating resource config: %w", err)
+	}
+	path, _, err := resource.Parameters()
+	if err != nil {
+		return fmt.Errorf("resource parameters: %w", err)
+	}
+
+	if d.StartTunnel != nil {
+		if err := d.StartTunnel(ctx, cfg); err != nil {
+			return fmt.Errorf("starting tunnel: %w", err)
+		}
+	}
+
+	// The materialization name only labels the connection, and a read belongs to no
+	// materialization in particular.
+	const readerName = "destination-read"
+
+	endpoint, err := d.NewEndpoint(ctx, cfg, nil)
+	if err != nil {
+		return fmt.Errorf("creating endpoint: %w", err)
+	}
+	client, err := endpoint.NewClient(ctx, readerName, endpoint)
+	if err != nil {
+		return fmt.Errorf("creating client: %w", err)
+	}
+	defer client.Close()
+
+	reader, ok := client.(RowReader)
+	if !ok {
+		return fmt.Errorf("this connector's client cannot read rows: it does not implement sql.RowReader")
+	}
+	return reader.ReadRows(ctx, path, out)
+}
+
+// StdReadRows enumerates a table's rows over a database/sql handle, emitting each as
+// a JSON object keyed by column name. Values arrive as whatever the driver yields;
+// []byte is treated as text, which is how JSON and string columns come back.
+func StdReadRows(
+	ctx context.Context,
+	db *stdsql.DB,
+	identifier string,
+	out func(json.RawMessage) error,
+) error {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf("SELECT * FROM %s", identifier))
+	if err != nil {
+		return fmt.Errorf("querying %s: %w", identifier, err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("reading columns of %s: %w", identifier, err)
+	}
+
+	for rows.Next() {
+		var values = make([]any, len(columns))
+		var into = make([]any, len(columns))
+		for i := range values {
+			into[i] = &values[i]
+		}
+		if err := rows.Scan(into...); err != nil {
+			return fmt.Errorf("scanning a row of %s: %w", identifier, err)
+		}
+
+		var doc = make(map[string]any, len(columns))
+		for i, column := range columns {
+			if raw, ok := values[i].([]byte); ok {
+				doc[column] = string(raw)
+			} else {
+				doc[column] = values[i]
+			}
+		}
+		encoded, err := json.Marshal(doc)
+		if err != nil {
+			return fmt.Errorf("encoding a row of %s: %w", identifier, err)
+		}
+		if err := out(encoded); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}

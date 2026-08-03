@@ -371,3 +371,9 @@ func (c *client) SnapshotTestTable(ctx context.Context, path []string) (columnNa
 func (c *client) Close() {
 	c.db.Close()
 }
+
+// ReadRows implements sql.RowReader, which lets a test harness verify what this
+// connector actually materialized rather than take its word for it.
+func (c *client) ReadRows(ctx context.Context, path []string, out func(json.RawMessage) error) error {
+	return sql.StdReadRows(ctx, c.db, c.ep.Dialect.Identifier(path...), out)
+}

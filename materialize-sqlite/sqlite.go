@@ -161,6 +161,12 @@ func (c *client) Close() {
 	c.db.Close()
 }
 
+// ReadRows implements sql.RowReader, which lets a test harness verify what this
+// connector actually materialized rather than take its word for it.
+func (c *client) ReadRows(ctx context.Context, path []string, out func(json.RawMessage) error) error {
+	return sql.StdReadRows(ctx, c.db, sqliteDialect.Identifier(path...), out)
+}
+
 func newTransactor(
 	ctx context.Context,
 	materializationName string,
@@ -302,8 +308,10 @@ func (t *transactor) RecoverCheckpoint(_ context.Context, _ pf.MaterializationSp
 	return nil, nil
 }
 
-func (t *transactor) UnmarshalState(state json.RawMessage) error                  { return nil }
-func (t *transactor) Acknowledge(ctx context.Context, statePatches []json.RawMessage, stateKeys []string) (*pf.ConnectorState, error) { return nil, nil }
+func (t *transactor) UnmarshalState(state json.RawMessage) error { return nil }
+func (t *transactor) Acknowledge(ctx context.Context, statePatches []json.RawMessage, stateKeys []string) (*pf.ConnectorState, error) {
+	return nil, nil
+}
 
 func (d *transactor) Load(
 	it *m.LoadIterator,
